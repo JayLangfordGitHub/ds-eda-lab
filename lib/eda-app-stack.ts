@@ -23,8 +23,12 @@ export class EDAAppStack extends cdk.Stack {
       publicReadAccess: false,
     });
 
-    // SQS Queue
+    // SQS Queues
     const imageProcessQueue = new sqs.Queue(this, "img-created-queue", {
+      receiveMessageWaitTime: cdk.Duration.seconds(10),
+    });
+
+    const mailerQ = new sqs.Queue(this, "mailer-queue", {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
     });
 
@@ -33,18 +37,17 @@ export class EDAAppStack extends cdk.Stack {
       displayName: "New Image topic",
     });
 
-    // Change S3 event notification to SNS
+    // S3 event notification to SNS
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
-      new s3n.SnsDestination(newImageTopic) // Send events to SNS topic
+      new s3n.SnsDestination(newImageTopic)
     );
 
-    // Subscribe SQS queue to SNS topic
-    newImageTopic.addSubscription(
-      new subs.SqsSubscription(imageProcessQueue)
-    );
+    // Subscribe queues to SNS topic
+    newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue));
+    newImageTopic.addSubscription(new subs.SqsSubscription(mailerQ));
 
-    // Lambda Function for Image Processing
+    // Lambda Functions
     const processImageFn = new lambdanode.NodejsFunction(this, "ProcessImageFn", {
       runtime: lambda.Runtime.NODEJS_18_X,
       entry: `${__dirname}/../lambdas/processImage.ts`,
@@ -52,15 +55,40 @@ export class EDAAppStack extends cdk.Stack {
       memorySize: 128,
     });
 
-    // Configure Lambda to process events from SQS
+    const mailerFn = new lambdanode.NodejsFunction(this, "mailer-function", {
+      runtime: lambda.Runtime.NODEJS_16_X,
+      memorySize: 1024,
+      timeout: cdk.Duration.seconds(3),
+      entry: `${__dirname}/../lambdas/mailer.ts`,
+    });
+
+    // Event sources for Lambda
     const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {
       batchSize: 5,
       maxBatchingWindow: cdk.Duration.seconds(5),
     });
     processImageFn.addEventSource(newImageEventSource);
 
-    // Grant Lambda read access to the S3 bucket
+    const newImageMailEventSource = new events.SqsEventSource(mailerQ, {
+      batchSize: 5,
+      maxBatchingWindow: cdk.Duration.seconds(5),
+    });
+    mailerFn.addEventSource(newImageMailEventSource);
+
+    // Permissions
     imagesBucket.grantRead(processImageFn);
+
+    mailerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "ses:SendEmail",
+          "ses:SendRawEmail",
+          "ses:SendTemplatedEmail",
+        ],
+        resources: ["*"],
+      })
+    );
 
     // Outputs
     new cdk.CfnOutput(this, "bucketName", {

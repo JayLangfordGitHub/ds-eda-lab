@@ -16,16 +16,46 @@ export class EDAAppStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    // S3 Bucket
     const imagesBucket = new s3.Bucket(this, "images", {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
       publicReadAccess: false,
     });
 
-    // Output
-    
+    // SQS Queue
+    const queue = new sqs.Queue(this, "img-created-queue", {
+      receiveMessageWaitTime: cdk.Duration.seconds(5),
+    });
+
+    // Lambda Function
+    const processImageFn = new lambdanode.NodejsFunction(this, "ProcessImageFn", {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      entry: `${__dirname}/../lambdas/processImage.ts`,
+      timeout: cdk.Duration.seconds(15),
+      memorySize: 128,
+    });
+
+    // Configure S3 to send events to SQS
+    imagesBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.SqsDestination(queue)
+    );
+
+    // Configure Lambda to process events from SQS
+    const newImageEventSource = new events.SqsEventSource(queue, {
+      batchSize: 5,
+      maxBatchingWindow: cdk.Duration.seconds(5),
+    });
+    processImageFn.addEventSource(newImageEventSource);
+
+    // Grant Lambda read access to the S3 bucket
+    imagesBucket.grantRead(processImageFn);
+
+    // Outputs
     new cdk.CfnOutput(this, "bucketName", {
       value: imagesBucket.bucketName,
     });
   }
 }
+
